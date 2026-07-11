@@ -1,0 +1,12 @@
+{
+  "listen_addr": "0.0.0.0:8768",
+  "base_url": "https://biset.md",
+  "hostname": "biset.md",
+  "vapid_public_key": "",
+  "vapid_private_key": "",
+  "domain": {
+    "biset.md": {
+      "account": {}
+    }
+  }
+}
