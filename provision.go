@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
 
 	"github.com/yno9/go-jmapap/cryptenv"
+	jmapserver "github.com/yno9/go-jmapserver"
 )
 
 var validUsername = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,30}$`)
@@ -42,9 +44,16 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 			return
 		}
 
+		// Signature-based provisioning (biset DID.md third-party portability).
 		var body struct {
-			Username string          `json:"username"`
-			Envelope json.RawMessage `json:"envelope"`
+			Username        string          `json:"username"`
+			Domain          string          `json:"domain,omitempty"`
+			DID             string          `json:"did"`
+			BindTS          int64           `json:"bind_ts"`
+			DIDSig          string          `json:"did_sig"`
+			AuthTokenHash   string          `json:"auth_token_hash"`
+			ProvisionSecret string          `json:"provision_secret,omitempty"`
+			Envelope        json.RawMessage `json:"envelope,omitempty"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -56,56 +65,86 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 			http.Error(w, "invalid username", http.StatusBadRequest)
 			return
 		}
-
-		domain := provisionDomain()
-		if domain == "" {
-			http.Error(w, "account creation not available", http.StatusForbidden)
+		if body.AuthTokenHash == "" {
+			http.Error(w, "auth_token_hash required", http.StatusBadRequest)
 			return
+		}
+		// DID is optional (biset started as a plain JMAP server; DID is a layered
+		// identity feature, not a requirement to have an account at all — see
+		// DID.md "coreless" mode). A client that omits it gets a plain account:
+		// no binding proof needed, no anchor claim, no DNS record, no
+		// discovery/portability — same as any classic JMAP mailbox.
+		hasDID := body.DID != ""
+		if hasDID {
+			if body.DIDSig == "" {
+				http.Error(w, "did_sig required when did is present", http.StatusBadRequest)
+				return
+			}
+			if err := jmapserver.VerifyDIDBinding(body.DID, username, r.Host, body.BindTS, body.DIDSig); err != nil {
+				http.Error(w, "did binding: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+		}
+
+		// Domain routing + provision policy (open, or gated by a shared secret).
+		domain := strings.ToLower(strings.TrimSpace(body.Domain))
+		var dc DomainConfig
+		if domain != "" {
+			c, ok := cfg.Domains[domain]
+			if !ok {
+				http.Error(w, "unknown domain", http.StatusBadRequest)
+				return
+			}
+			dc = c
+		} else {
+			domain = provisionDomain()
+			if domain == "" {
+				http.Error(w, "account creation not available", http.StatusForbidden)
+				return
+			}
+			dc = cfg.Domains[domain]
+		}
+		if !dc.AllowProvision {
+			if dc.ProvisionSecret == "" || body.ProvisionSecret != dc.ProvisionSecret {
+				http.Error(w, "domain not open for provisioning", http.StatusForbidden)
+				return
+			}
 		}
 		email := username + "@" + domain
 
-		// Check not already taken (static config or dynamic).
-		//
-		// A config-reserved (static) username is normally initialized via a setup
-		// token, so provisioning is refused. The exception: an identity a sibling
-		// relay already owns has an anchor fingerprint here but no local envelope
-		// yet — it may be claimed by presenting the matching envelope (the anchor
-		// check below enforces the match). This is how biset adds the AP relay to
-		// a mail-only identity. Still refuse if an envelope already exists, or if
-		// there is no anchor entry to gate the claim.
-		if domCfg, ok := cfg.Domains[domain]; ok {
-			if _, ok := domCfg.Accounts[username]; ok {
-				hasEnv := readEnvelope(dataDir, domain, username) != nil
-				hasAnchor := readIdentityFP(dataDir, domain, username) != ""
-				if hasEnv || !hasAnchor {
-					http.Error(w, "username taken", http.StatusConflict)
-					return
-				}
-			}
-		}
+		// Accounts are purely dynamic (no config-managed account list) — a name is
+		// taken iff it already has a credential.
 		h.mu.RLock()
 		_, dynExists := h.dyn[email]
 		h.mu.RUnlock()
-		if dynExists || readEnvelope(dataDir, domain, username) != nil {
+		if dynExists || readAuthHash(dataDir, domain, username) != "" {
 			http.Error(w, "username taken", http.StatusConflict)
 			return
 		}
 
-		env, err := cryptenv.FromBytes(body.Envelope)
-		if err != nil {
-			http.Error(w, "invalid envelope", http.StatusBadRequest)
-			return
+		// Identity anchor: claim/verify localpart → DID (signature already proved
+		// control above). jmapap holds no anchor storage of its own anymore — it
+		// defers to the standalone anchor service, same as jmapsmtp already does.
+		// Anchorless (AnchorURL unset) just skips this (DID.md "DID is optional").
+		if hasDID && cfg.AnchorURL != "" {
+			switch jmapserver.AnchorClaim(cfg.AnchorURL, username, domain, "", body.DID) {
+			case "conflict":
+				http.Error(w, "identity owned by a different key", http.StatusConflict)
+				return
+			case "error":
+				log.Printf("[anchor] unreachable (%s) — refusing provision of %s@%s", cfg.AnchorURL, username, domain)
+				http.Error(w, "identity anchor unavailable", http.StatusServiceUnavailable)
+				return
+			}
 		}
-		// Identity anchor: claim (or verify) the name against its envelope
-		// fingerprint so this address can't be split across relays. jmapap hosts
-		// the registry, so we claim in-process.
-		if !claimIdentity(dataDir, domain, username, envelopeFingerprint(env)) {
-			http.Error(w, "identity owned by a different key", http.StatusConflict)
-			return
-		}
-		if err := writeEnvelope(dataDir, domain, username, env); err != nil {
+		if err := writeAuthHash(dataDir, domain, username, body.AuthTokenHash); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		if len(body.Envelope) > 0 {
+			if env, err := cryptenv.FromBytes(body.Envelope); err == nil {
+				writeEnvelope(dataDir, domain, username, env) //nolint:errcheck
+			}
 		}
 
 		// A static account already has a store from startup; only register a new
@@ -113,6 +152,15 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 		// existing store / its loaded messages).
 		if !h.hasAccount(email) {
 			h.addDynAccount(username, domain, dataDir)
+			// DID-rooted *organization*, not storage merging (DID.md
+			// data-model-inversion, walked back to an index-only design,
+			// shared with jmapsmtp via go-jmapserver/didindex.go): every
+			// address still gets its own independent store (and, for AP,
+			// its own actor key/URI); this just records which addresses on
+			// this relay trace back to which DID.
+			if hasDID {
+				jmapserver.RecordLocalDID(dataDir, body.DID, email)
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -15,7 +15,7 @@ var (
 	}, []string{"result"})
 	apInbox = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "biset_ap_inbox_activities_total",
-		Help: "Inbound ActivityPub activities, by type (bounded: Accept/Create/other).",
+		Help: "Inbound ActivityPub activities, by type. Bounded to Accept/Create, the standard unhandled types in knownUnhandledType, and 'other'.",
 	}, []string{"type"})
 )
 
@@ -28,6 +28,9 @@ func relayCollectors() []prometheus.Collector {
 	apSignature.WithLabelValues("failed")
 	apInbox.WithLabelValues("Accept")
 	apInbox.WithLabelValues("Create")
+	for t := range knownUnhandledType {
+		apInbox.WithLabelValues(t)
+	}
 	apInbox.WithLabelValues("other")
 	return []prometheus.Collector{apOutbound, apSignature, apInbox}
 }

@@ -380,7 +380,20 @@ func sendToActor(h *handler, domain, localpart string, msg email.Email, target s
 		return "", err
 	}
 	log.Printf("[ap] %s send → %s", acctHandle(localpart, domain), resolved.inboxURL)
-	return noteID, httpSignedPost(resolved.inboxURL, payload, h.apKey(domain, localpart), keyID(localpart, domain))
+	err = httpSignedPost(resolved.inboxURL, payload, h.apKey(domain, localpart), keyID(localpart, domain))
+	logActivity(domain, localpart, jmapserver.ActivityEvent{
+		Time: ts, Dir: "out", Kind: "note", Peer: target, MsgID: noteID,
+		Bytes: int64(len(body)), Result: activityResult(err),
+	})
+	return noteID, err
+}
+
+// activityResult maps a delivery error to the ActivityEvent.Result label.
+func activityResult(err error) string {
+	if err != nil {
+		return "failed"
+	}
+	return "ok"
 }
 
 func sendFollow(h *handler, domain, localpart, target string) (string, error) {
@@ -403,7 +416,11 @@ func sendFollow(h *handler, domain, localpart, target string) (string, error) {
 		return "", err
 	}
 	log.Printf("[ap] %s follow → %s (%s)", acctHandle(localpart, domain), target, resolved.inboxURL)
-	if err := httpSignedPost(resolved.inboxURL, payload, h.apKey(domain, localpart), keyID(localpart, domain)); err != nil {
+	err = httpSignedPost(resolved.inboxURL, payload, h.apKey(domain, localpart), keyID(localpart, domain))
+	logActivity(domain, localpart, jmapserver.ActivityEvent{
+		Time: ts, Dir: "out", Kind: "follow", Peer: target, Result: activityResult(err),
+	})
+	if err != nil {
 		return "", err
 	}
 	return actID, nil
@@ -435,13 +452,56 @@ func sendUnfollow(h *handler, domain, localpart string, followMsgID jmap.ID, tar
 	primary := acctHandle(localpart, domain)
 	followedActors.Delete(followKey(primary, resolved.actorURL))
 	log.Printf("[ap] %s unfollow → %s (%s)", primary, target, resolved.inboxURL)
-	return httpSignedPost(resolved.inboxURL, payload, h.apKey(domain, localpart), keyID(localpart, domain))
+	err = httpSignedPost(resolved.inboxURL, payload, h.apKey(domain, localpart), keyID(localpart, domain))
+	logActivity(domain, localpart, jmapserver.ActivityEvent{
+		Time: ts, Dir: "out", Kind: "unfollow", Peer: target, Result: activityResult(err),
+	})
+	return err
 }
 
 // ── receive (AP → store) ────────────────────────────────────────────────────────
 
 var tagRe = regexp.MustCompile(`<[^>]+>`)
 var mentionRe = regexp.MustCompile(`^(@\S+\s*)+`)
+
+// loggedUnhandled tracks activity types already logged from handleInbox's default
+// case, so each unhandled type is logged once rather than on every delivery.
+var loggedUnhandled sync.Map
+
+// knownUnhandledType bounds the biset_ap_inbox_activities_total "type" label to a
+// fixed set of standard ActivityStreams types this relay receives but doesn't
+// process. Anything outside the set is counted as "other" — activity.Type is
+// peer-controlled and must not become an unbounded metric label.
+var knownUnhandledType = map[string]bool{
+	"Delete":   true,
+	"Update":   true,
+	"Announce": true,
+	"Like":     true,
+	"Undo":     true,
+	"Follow":   true,
+	"Add":      true,
+	"Remove":   true,
+	"Move":     true,
+	"Reject":   true,
+	"Block":    true,
+	"Flag":     true,
+}
+
+// apDataDir is the account data root, captured at route registration so the
+// inbox handlers (which don't carry *handler) can write per-account activity.
+var apDataDir string
+
+// logActivity records a per-account activity event, best-effort: a failed audit
+// write must never break message handling. Mirrors the pattern used by the SMTP
+// relay so the admin API reads a uniform activity.log across both.
+func logActivity(domain, localpart string, ev jmapserver.ActivityEvent) {
+	if apDataDir == "" {
+		return
+	}
+	if err := jmapserver.AppendActivity(apDataDir, domain, localpart, ev); err != nil {
+		log.Printf("[ap] %s activity log: %v", acctHandle(localpart, domain), err)
+	}
+}
 
 func handleInbox(store *jmapserver.Store, hub *jmapserver.Hub, domain, localpart string, body []byte) {
 	var activity struct {
@@ -460,8 +520,24 @@ func handleInbox(store *jmapserver.Store, hub *jmapserver.Hub, domain, localpart
 		apInbox.WithLabelValues("Create").Inc()
 		handleCreate(store, hub, domain, localpart, activity.Actor, activity.Object)
 	default:
-		apInbox.WithLabelValues("other").Inc()
-		log.Printf("[ap] %s inbox: unhandled activity type %q", acctHandle(localpart, domain), activity.Type)
+		// Fediverse peers push a steady stream of activity types this relay
+		// doesn't handle (Delete, Announce, Like, Undo, …) — Mastodon alone
+		// broadcasts Delete(Actor) to every known server. Logging each at default
+		// level was permanent spam; log the first occurrence per type so a
+		// genuinely novel type still surfaces once, and let the per-type metric
+		// carry the ongoing counts.
+		//
+		// The metric label is clamped to a known set: activity.Type is
+		// peer-controlled, so binding it raw to a Prometheus label would let a
+		// remote server explode cardinality with arbitrary strings.
+		label := activity.Type
+		if !knownUnhandledType[label] {
+			label = "other"
+		}
+		apInbox.WithLabelValues(label).Inc()
+		if _, seen := loggedUnhandled.LoadOrStore(activity.Type, true); !seen {
+			log.Printf("[ap] %s inbox: unhandled activity type %q (further occurrences logged only in metrics)", acctHandle(localpart, domain), activity.Type)
+		}
 	}
 }
 
@@ -474,6 +550,7 @@ func handleAccept(store *jmapserver.Store, hub *jmapserver.Hub, domain, localpar
 	}
 	primary := acctHandle(localpart, domain)
 	log.Printf("[ap] %s: follow accepted by %s", primary, actor)
+	logActivity(domain, localpart, jmapserver.ActivityEvent{Dir: "in", Kind: "accept", Peer: actorURLToHandle(actor)})
 	for _, msg := range store.All() {
 		if msg.MailboxIDs[jmap.ID(feedsMailboxID(primary))] && len(msg.To) > 0 && msg.To[0] != nil {
 			handle := msg.To[0].Email
@@ -558,6 +635,9 @@ func handleCreate(store *jmapserver.Store, hub *jmapserver.Hub, domain, localpar
 		log.Printf("[ap] %s store put: %v", primary, err)
 		return
 	}
+	logActivity(domain, localpart, jmapserver.ActivityEvent{
+		Time: ts, Dir: "in", Kind: "note", Peer: from, MsgID: obj.ID, Bytes: int64(len(text)),
+	})
 	hub.Notify()
 }
 
@@ -676,6 +756,7 @@ func serveWebIndex(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func registerAPRoutes(mux *http.ServeMux, h *handler) {
+	apDataDir = h.dataDir
 	mux.HandleFunc("/.well-known/webfinger", logRequest(func(w http.ResponseWriter, r *http.Request) {
 		resource := r.URL.Query().Get("resource")
 		acct := strings.TrimPrefix(resource, "acct:")
@@ -717,7 +798,20 @@ func registerAPRoutes(mux *http.ServeMux, h *handler) {
 			color = "#8b5cf6"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"label": label, "color": color}) //nolint:errcheck
+		// "type" reports what this relay actually IS (jmapap = activitypub),
+		// independent of the requesting client's own home config. Clients
+		// previously guessed protocol by string-matching a relay's URL against
+		// their OWN configured ap_url — true only for the user's home AP relay,
+		// silently wrong for any other AP relay (e.g. a third-party one moved
+		// to), which then looked identical to a mail relay in the UI and in
+		// published DID documents.
+		// "domain" is the domain a NEW account actually lands under
+		// (provisionDomain() — not necessarily this relay's own hostname).
+		resp := map[string]string{"label": label, "color": color, "type": "activitypub"}
+		if d := provisionDomain(); d != "" {
+			resp["domain"] = d
+		}
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
 	})
 
 	// Recipient discovery for the biset composer: given acct:user@host, report

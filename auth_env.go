@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/yno9/go-jmapap/cryptenv"
+	jmapserver "github.com/yno9/go-jmapserver"
 )
 
 // envelope.json layout: cryptenv.Envelope serialized as JSON.
@@ -18,6 +19,27 @@ import (
 
 func envelopeFile(dataDir, domain, localpart string) string {
 	return filepath.Join(dataDir, domain, localpart, "envelope.json")
+}
+
+// Per-account, per-relay auth-token hash — see go-jmapsmtp/auth_env.go for the
+// rationale (relay-scoped tokens; DID-less / third-party accounts have no envelope).
+func authHashFile(dataDir, domain, localpart string) string {
+	return filepath.Join(dataDir, domain, localpart, "auth_token_hash")
+}
+
+func readAuthHash(dataDir, domain, localpart string) string {
+	if b, err := os.ReadFile(authHashFile(dataDir, domain, localpart)); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
+}
+
+func writeAuthHash(dataDir, domain, localpart, hashB64 string) error {
+	dir := filepath.Join(dataDir, domain, localpart)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(authHashFile(dataDir, domain, localpart), []byte(hashB64), 0600)
 }
 
 func readEnvelope(dataDir, domain, localpart string) *cryptenv.Envelope {
@@ -60,15 +82,15 @@ func authenticate(r *http.Request, dataDir string) (domain, localpart string, ok
 	if _, exists := cfg.Domains[dm]; !exists {
 		return "", "", false
 	}
-	env := readEnvelope(dataDir, dm, lp)
-	if env == nil {
+	hash := readAuthHash(dataDir, dm, lp)
+	if hash == "" {
 		return "", "", false
 	}
 	tok, err := decodeAuthToken(password)
 	if err != nil {
 		return "", "", false
 	}
-	if !env.VerifyAuth(tok) {
+	if !jmapserver.VerifyAuthToken(tok, hash) {
 		return "", "", false
 	}
 	return dm, lp, true

@@ -21,6 +21,7 @@ import (
 	"git.sr.ht/~rockorager/go-jmap/mail/emailsubmission"
 	"git.sr.ht/~rockorager/go-jmap/mail/mailbox"
 	jmapserver "github.com/yno9/go-jmapserver"
+	"github.com/yno9/go-jmapserver/pkarr"
 )
 
 // ── config ──────────────────────────────────────────────────────────────────────
@@ -30,8 +31,11 @@ type AccountConfig struct {
 }
 
 type DomainConfig struct {
-	Accounts       map[string]AccountConfig `json:"account"`
-	AllowProvision bool                     `json:"allow_provision"`
+	Accounts map[string]AccountConfig `json:"account"`
+	// allow_provision: open self-service. provision_secret: gated creation
+	// (privileged apex; needs the shared secret, not creatable from the UI).
+	AllowProvision  bool   `json:"allow_provision"`
+	ProvisionSecret string `json:"provision_secret,omitempty"`
 }
 
 type Config struct {
@@ -55,6 +59,11 @@ type Config struct {
 	// PeerDataDirs lists sibling relay data directories to check for activity
 	// before purging. An account is only purged if all peers are also inactive.
 	PeerDataDirs []string `json:"peer_data_dirs"`
+	// AnchorURL points at the standalone identity anchor service (see
+	// go-jmap-anchor) that jmapap defers DID coordination to — jmapap holds no
+	// anchor storage or Cloudflare credential of its own. Empty = anchorless
+	// (DID.md "DID is optional"): provisioning proceeds unguarded/DID-less.
+	AnchorURL string `json:"anchor_url"`
 }
 
 var cfg Config
@@ -336,7 +345,11 @@ func (h *handler) addDynAccount(localpart, domain, dataDir string) {
 	log.Printf("[provision] registered account %s", primary)
 }
 
-// scanDynAccounts recovers dynamically provisioned accounts from disk on restart.
+// scanDynAccounts recovers dynamically provisioned accounts from disk on
+// restart. Existence is an auth_token_hash credential, not an envelope —
+// envelope-less third-party/DID-only accounts are a legitimate, common case
+// (see DID.md third-party portability) and must survive a restart exactly
+// like any other account.
 func scanDynAccounts(h *handler) {
 	for domain, dc := range cfg.Domains {
 		entries, err := os.ReadDir(filepath.Join(h.dataDir, domain))
@@ -351,7 +364,7 @@ func scanDynAccounts(h *handler) {
 			if !e.IsDir() || static[e.Name()] {
 				continue
 			}
-			if readEnvelope(h.dataDir, domain, e.Name()) != nil {
+			if readAuthHash(h.dataDir, domain, e.Name()) != "" {
 				h.addDynAccount(e.Name(), domain, h.dataDir)
 			}
 		}
@@ -404,12 +417,12 @@ func main() {
 				return "", false
 			}
 		}
-		env := readEnvelope(dataDir, domain, localpart)
-		if env == nil {
+		hash := readAuthHash(dataDir, domain, localpart)
+		if hash == "" {
 			return "", false
 		}
 		tok, err := decodeAuthToken(password)
-		if err != nil || !env.VerifyAuth(tok) {
+		if err != nil || !jmapserver.VerifyAuthToken(tok, hash) {
 			return "", false
 		}
 		return jmap.ID(strings.ToLower(username)), true
@@ -456,13 +469,48 @@ func main() {
 	registerAuthEnv(mux, dataDir)
 	registerProvision(mux, h, dataDir)
 	registerAPRoutes(mux, h)
-	registerAnchor(mux, h)
+	registerDidUpdate(mux, h, dataDir)
+	jmapserver.RegisterDIDLocalIndex(mux, dataDir)
+	jmapserver.RegisterContactsEndpoints(mux, dataDir, authenticate)
+	// Pkarr/did:dht resolution gateway (DID.md). Opt-in via PKARR_GATEWAY=1 —
+	// it starts a Mainline DHT node (UDP), so it stays off until explicitly
+	// enabled. Mounts GET/PUT /pkarr/<z-base-32 key>. Created before
+	// registerAccountDelete (below) so a deleted identity's record can be
+	// evicted from the republish cache — see pkarr.Gateway.Forget.
+	var pkarrGw *pkarr.Gateway
+	if os.Getenv("PKARR_GATEWAY") == "1" {
+		if gw, err := pkarr.NewGateway(nil); err != nil {
+			log.Printf("[pkarr] gateway disabled: %v", err)
+		} else {
+			pkarrGw = gw
+			pkarr.RegisterGateway(mux, gw)
+			log.Printf("[pkarr] gateway enabled")
+		}
+	}
+	registerAccountDelete(mux, h, dataDir, pkarrGw)
+	jmapserver.RegisterStorageEndpoints(mux, dataDir, authenticate, func(email string) int {
+		h.mu.RLock()
+		st := h.stores[email]
+		h.mu.RUnlock()
+		if st == nil {
+			return 0
+		}
+		n := st.Purge()
+		h.hub.Notify()
+		return n
+	})
 	jmapserver.RegisterMetrics(mux, jmapserver.MetricsOptions{
 		DataDir:    dataDir,
 		RelayLabel: cfg.RelayLabel,
 		Version:    version,
 		Token:      os.Getenv("METRICS_TOKEN"),
 	}, relayCollectors()...)
+	jmapserver.RegisterAdmin(mux, jmapserver.AdminOptions{
+		DataDir:    dataDir,
+		RelayLabel: cfg.RelayLabel,
+		Version:    version,
+		Token:      os.Getenv("ADMIN_TOKEN"),
+	})
 	backfillAnchor(h) // record fingerprints for accounts created before the anchor
 	startMaintenance(h)
 
@@ -471,5 +519,5 @@ func main() {
 		addr = "0.0.0.0:8768"
 	}
 	log.Printf("go-jmapap: ActivityPub + JMAP listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Fatal(http.ListenAndServe(addr, jmapserver.WrapCORS(mux)))
 }
