@@ -82,9 +82,9 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 			}
 			// The proof is verified by the anchor, not here (ANCHOR.md decision 1),
 			// so without an anchor there is nobody to verify it — and an unverified
-			// DID must never reach RecordLocalDID, or anyone could have this relay
-			// index someone else's identity as their own. Anchorless means plain
-			// accounts, exactly as ANCHOR.md's non-goals describe it.
+			// DID must never be claimed, or anyone could have a stranger's identity
+			// recorded as their own. Anchorless means plain accounts, exactly as
+			// ANCHOR.md's non-goals describe it.
 			if cfg.AnchorURL == "" {
 				http.Error(w, "did not supported on this relay (no identity anchor)", http.StatusBadRequest)
 				return

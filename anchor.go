@@ -13,7 +13,6 @@ import (
 
 	"github.com/yno9/go-jmapap/cryptenv"
 	jmapserver "github.com/yno9/go-jmapserver"
-	"github.com/yno9/go-jmapserver/pkarr"
 )
 
 // ── identity anchor (client side) ──────────────────────────────────────────
@@ -143,16 +142,13 @@ func registerDidUpdate(mux *http.ServeMux, h *handler, dataDir string) {
 // map deletions (including apKeys, jmapap-only), same os.RemoveAll — just
 // on-demand for one account instead of a periodic sweep over all of them.
 //
-// The optional {"did":"..."} body field is used only to evict the record from
-// this relay's own pkarr gateway cache
-// if it runs one (gw may be nil — PKARR_GATEWAY is opt-in) so it stops
-// indefinitely re-announcing an orphaned DID document (see pkarr.Gateway.
-// Forget's comment: BEP44 records only fade in ~2 hours once nothing is
-// left re-announcing them). There's no email→DID reverse index on disk to
-// derive any of this from, so the client (which already knows its own DID)
-// supplies it — a wrong or omitted value only skips these cleanup steps; it
-// has no bearing on which account gets deleted.
-func registerAccountDelete(mux *http.ServeMux, h *handler, dataDir string, gw *pkarr.Gateway) {
+// Nothing about a DID is needed here any more. AnchorRelease tells the anchor
+// the address is gone, and the anchor takes it from there: it reads the DID off
+// the claim it is about to release, withdraws the DNS record, and stops
+// re-announcing the DHT record. Clients still send {"did":"..."} and it is
+// simply ignored — it was only ever there because this relay had no way to look
+// the DID up, and the anchor has never had that problem.
+func registerAccountDelete(mux *http.ServeMux, h *handler, dataDir string) {
 	mux.HandleFunc("/account/delete", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -177,11 +173,6 @@ func registerAccountDelete(mux *http.ServeMux, h *handler, dataDir string, gw *p
 				return
 			}
 		}
-		var body struct {
-			DID string `json:"did"`
-		}
-		json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&body) //nolint:errcheck
-
 		email := localpart + "@" + domain
 		acctDir := filepath.Join(dataDir, domain, localpart)
 
@@ -196,13 +187,6 @@ func registerAccountDelete(mux *http.ServeMux, h *handler, dataDir string, gw *p
 		}
 		h.mu.Unlock()
 
-		if body.DID != "" {
-			if pk, err := jmapserver.DIDPublicKey(body.DID); err == nil && gw != nil {
-				var pubkey [32]byte
-				copy(pubkey[:], pk)
-				gw.Forget(pubkey)
-			}
-		}
 		jmapserver.AnchorRelease(cfg.AnchorURL, localpart, domain)
 		if err := os.RemoveAll(acctDir); err != nil {
 			log.Printf("[delete] failed to remove %s: %v", acctDir, err)
