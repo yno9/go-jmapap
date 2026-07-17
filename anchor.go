@@ -99,6 +99,16 @@ func registerDidUpdate(mux *http.ServeMux, h *handler, dataDir string) {
 			http.Error(w, "did required", http.StatusBadRequest)
 			return
 		}
+		// An anchorless relay cannot take a DID at all — the same answer, in the
+		// same words, that /account/provision gives. This used to 204: it
+		// reported success for work it had not done and could not do, having no
+		// anchor to prove the DID against and, since the local index went away,
+		// nowhere to record one either. The caller treating this as best-effort
+		// is not a licence to lie to it.
+		if cfg.AnchorURL == "" {
+			http.Error(w, "did not supported on this relay (no identity anchor)", http.StatusBadRequest)
+			return
+		}
 		// Basic Auth proves the caller owns this ACCOUNT. It says nothing about
 		// whether they own the DID they are naming, and those are different
 		// claims: without a signature anyone with a self-service account could
@@ -106,10 +116,6 @@ func registerDidUpdate(mux *http.ServeMux, h *handler, dataDir string) {
 		// DNS record asserting it. Same rule as /account/provision.
 		if body.DIDSig == "" {
 			http.Error(w, "did_sig required", http.StatusBadRequest)
-			return
-		}
-		if cfg.AnchorURL == "" {
-			w.WriteHeader(http.StatusNoContent) // anchorless: nothing to register
 			return
 		}
 		env := readEnvelope(dataDir, domain, localpart)

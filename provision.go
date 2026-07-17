@@ -76,17 +76,20 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 		// discovery/portability — same as any classic JMAP mailbox.
 		hasDID := body.DID != ""
 		if hasDID {
-			if body.DIDSig == "" {
-				http.Error(w, "did_sig required when did is present", http.StatusBadRequest)
-				return
-			}
-			// The proof is verified by the anchor, not here (ANCHOR.md decision 1),
-			// so without an anchor there is nobody to verify it — and an unverified
-			// DID must never be claimed, or anyone could have a stranger's identity
-			// recorded as their own. Anchorless means plain accounts, exactly as
-			// ANCHOR.md's non-goals describe it.
+			// Anchorless first, because it is the more fundamental refusal: this
+			// relay cannot take a DID at all, and saying "did_sig required" to
+			// someone who then supplies one would be a lie. The proof is verified
+			// by the anchor, not here (ANCHOR.md decision 1), so with no anchor
+			// there is nobody to verify it — and an unverified DID must never be
+			// claimed, or anyone could have a stranger's identity recorded as
+			// their own. Anchorless means plain accounts, exactly as ANCHOR.md's
+			// non-goals describe it.
 			if cfg.AnchorURL == "" {
 				http.Error(w, "did not supported on this relay (no identity anchor)", http.StatusBadRequest)
+				return
+			}
+			if body.DIDSig == "" {
+				http.Error(w, "did_sig required when did is present", http.StatusBadRequest)
 				return
 			}
 		}

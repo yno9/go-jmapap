@@ -58,10 +58,20 @@ type Config struct {
 	// PeerDataDirs lists sibling relay data directories to check for activity
 	// before purging. An account is only purged if all peers are also inactive.
 	PeerDataDirs []string `json:"peer_data_dirs"`
-	// AnchorURL points at the standalone identity anchor service (see
-	// go-jmap-anchor) that jmapap defers DID coordination to — jmapap holds no
-	// anchor storage or Cloudflare credential of its own. Empty = anchorless
-	// (DID.md "DID is optional"): provisioning proceeds unguarded/DID-less.
+	// AnchorURL points at the standalone identity anchor (biset-anchor) that
+	// jmapap defers every DID question to: proving a DID belongs to whoever
+	// claims it, the cross-relay name registry, the DNS record, and the
+	// Pkarr/DHT gateway /pkarr forwards to. jmapap holds no anchor storage, no
+	// Cloudflare credential and no DID crypto of its own — it stopped being the
+	// anchor at c25743f and stopped judging DIDs entirely a while after.
+	//
+	// **This is the whole opt-in.** Set = this relay serves DID identities.
+	// Empty = anchorless, and anchorless means no DIDs at all, not DIDs without
+	// coordination (ANCHOR.md decision 2). It is a stricter mode, not a laxer
+	// one: an account with a DID is REFUSED (400), because the proof is checked
+	// by the anchor and there is nobody to check it — and there is nowhere left
+	// here to record one. Plain JMAP accounts are unaffected and behave
+	// identically either way; /pkarr is not mounted at all.
 	AnchorURL string `json:"anchor_url"`
 }
 
