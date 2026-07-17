@@ -536,7 +536,6 @@ func main() {
 		Version:    version,
 		Token:      os.Getenv("ADMIN_TOKEN"),
 	})
-	backfillAnchor(h) // record fingerprints for accounts created before the anchor
 	startMaintenance(h)
 
 	addr := cfg.ListenAddr

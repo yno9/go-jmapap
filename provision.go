@@ -136,8 +136,8 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 		// anchor service, same as jmapsmtp. r.Host is forwarded verbatim — it is
 		// what the client signed against, and only this relay saw it first-hand.
 		if hasDID {
-			proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
-			switch jmapserver.AnchorClaim(anchorRef(), username, domain, "", body.DID, proof) {
+			proof := jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
+			switch jmapserver.AnchorClaim(anchorRef(), username, domain, body.DID, proof) {
 			case "invalid":
 				http.Error(w, "did binding rejected", http.StatusUnauthorized)
 				return

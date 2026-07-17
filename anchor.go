@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -11,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yno9/go-jmapap/cryptenv"
 	jmapserver "github.com/yno9/go-jmapserver"
 )
 
@@ -22,48 +19,6 @@ import (
 // same way go-jmapsmtp already does. jmapap keeps no local anchor storage and
 // holds no Cloudflare credential. If cfg.AnchorURL is unset, DID coordination
 // is simply skipped (DID.md "DID is optional" / "anchorless" mode).
-
-// envelopeFingerprint is a stable hash of the cryptenv envelope. biset sends the
-// identical envelope to every relay, so the fingerprint is identical across them.
-func envelopeFingerprint(env *cryptenv.Envelope) string {
-	b, err := env.Bytes()
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
-// backfillAnchor pushes fingerprints for accounts that predate the anchor
-// (or that were created while anchorless), so existing identities are
-// protected too, once/if an anchor is configured.
-func backfillAnchor(h *handler) {
-	if cfg.AnchorURL == "" {
-		return
-	}
-	h.mu.RLock()
-	primaries := make([]string, 0, len(h.stores))
-	for p := range h.stores {
-		primaries = append(primaries, p)
-	}
-	h.mu.RUnlock()
-	for _, primary := range primaries {
-		parts := strings.SplitN(primary, "@", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		lp, dm := parts[0], parts[1]
-		if env := readEnvelope(h.dataDir, dm, lp); env != nil {
-			// No DID at backfill time — backfill has no client interaction to
-			// derive one from. It fills in on this account's next lazy-migration
-			// login (DID.md's "Existing account" flow), same as any other
-			// pre-DID identity.
-			if jmapserver.AnchorClaim(anchorRef(), lp, dm, envelopeFingerprint(env), "", nil) == "conflict" {
-				log.Printf("[anchor] SPLIT DETECTED: %s is already claimed with a different key on the anchor", primary)
-			}
-		}
-	}
-}
 
 // registerDidUpdate exposes PUT /account/did (Basic Auth) so an already-
 // provisioned account can register its DID after the fact — DID.md's "lazy
@@ -118,13 +73,12 @@ func registerDidUpdate(mux *http.ServeMux, h *handler, dataDir string) {
 			http.Error(w, "did_sig required", http.StatusBadRequest)
 			return
 		}
-		env := readEnvelope(dataDir, domain, localpart)
-		if env == nil {
-			http.Error(w, "no envelope on file", http.StatusInternalServerError)
-			return
-		}
-		proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
-		switch jmapserver.AnchorClaim(anchorRef(), localpart, domain, envelopeFingerprint(env), body.DID, proof) {
+		// The envelope used to be read here purely to fingerprint it for the
+		// claim. A claim names a DID and nothing else now, so an account with no
+		// envelope — a third-party relay never receives one — can register its
+		// DID like any other.
+		proof := jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
+		switch jmapserver.AnchorClaim(anchorRef(), localpart, domain, body.DID, proof) {
 		case "invalid":
 			http.Error(w, "did binding rejected", http.StatusUnauthorized)
 			return
