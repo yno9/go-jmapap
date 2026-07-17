@@ -143,12 +143,8 @@ func registerDidUpdate(mux *http.ServeMux, h *handler, dataDir string) {
 // map deletions (including apKeys, jmapap-only), same os.RemoveAll — just
 // on-demand for one account instead of a periodic sweep over all of them.
 //
-// The optional {"did":"..."} body field is used only to drop this address
-// from that DID's local index (jmapserver.RemoveLocalDID), release the
-// anchor's claim on this (domain, localpart) so it becomes registrable again
-// (jmapserver.AnchorRelease — otherwise a legitimate future registration of
-// the same address would be rejected forever as a false split-identity
-// conflict), and evict the record from this relay's own pkarr gateway cache
+// The optional {"did":"..."} body field is used only to evict the record from
+// this relay's own pkarr gateway cache
 // if it runs one (gw may be nil — PKARR_GATEWAY is opt-in) so it stops
 // indefinitely re-announcing an orphaned DID document (see pkarr.Gateway.
 // Forget's comment: BEP44 records only fade in ~2 hours once nothing is
@@ -201,7 +197,6 @@ func registerAccountDelete(mux *http.ServeMux, h *handler, dataDir string, gw *p
 		h.mu.Unlock()
 
 		if body.DID != "" {
-			jmapserver.RemoveLocalDID(dataDir, body.DID, email) //nolint:errcheck
 			if pk, err := jmapserver.DIDPublicKey(body.DID); err == nil && gw != nil {
 				var pubkey [32]byte
 				copy(pubkey[:], pk)

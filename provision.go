@@ -162,15 +162,11 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 		// existing store / its loaded messages).
 		if !h.hasAccount(email) {
 			h.addDynAccount(username, domain, dataDir)
-			// DID-rooted *organization*, not storage merging (DID.md
-			// data-model-inversion, walked back to an index-only design,
-			// shared with jmapsmtp via go-jmapserver/didindex.go): every
-			// address still gets its own independent store (and, for AP,
-			// its own actor key/URI); this just records which addresses on
-			// this relay trace back to which DID.
-			if hasDID {
-				jmapserver.RecordLocalDID(dataDir, body.DID, email)
-			}
+			// No local DID index to maintain: which addresses trace back to a
+			// DID is cross-relay information, so the anchor derives it from the
+			// claim this provision just made (ANCHOR.md decision 1). Every
+			// address still gets its own independent store (and, for AP, its own
+			// actor key/URI) — that was never what the index was for.
 		}
 
 		w.Header().Set("Content-Type", "application/json")
