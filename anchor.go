@@ -59,7 +59,7 @@ func backfillAnchor(h *handler) {
 			// derive one from. It fills in on this account's next lazy-migration
 			// login (DID.md's "Existing account" flow), same as any other
 			// pre-DID identity.
-			if jmapserver.AnchorClaim(cfg.AnchorURL, lp, dm, envelopeFingerprint(env), "") == "conflict" {
+			if jmapserver.AnchorClaim(cfg.AnchorURL, lp, dm, envelopeFingerprint(env), "", nil) == "conflict" {
 				log.Printf("[anchor] SPLIT DETECTED: %s is already claimed with a different key on the anchor", primary)
 			}
 		}
@@ -107,7 +107,13 @@ func registerDidUpdate(mux *http.ServeMux, h *handler, dataDir string) {
 			http.Error(w, "no envelope on file", http.StatusInternalServerError)
 			return
 		}
-		switch jmapserver.AnchorClaim(cfg.AnchorURL, localpart, domain, envelopeFingerprint(env), body.DID) {
+		// No proof to forward: this endpoint authenticates with the account's own
+		// credential, not a fresh binding signature (the client has no signing
+		// context here — see biset src/cryptenv.ts). The anchor therefore accepts
+		// a DID here unproven, which is why it cannot yet require did_sig
+		// outright: doing so would take lazy migration down. Giving this path a
+		// proof of its own is the prerequisite for that.
+		switch jmapserver.AnchorClaim(cfg.AnchorURL, localpart, domain, envelopeFingerprint(env), body.DID, nil) {
 		case "conflict":
 			http.Error(w, "did mismatch for this identity", http.StatusConflict)
 			return

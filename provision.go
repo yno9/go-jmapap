@@ -80,8 +80,13 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 				http.Error(w, "did_sig required when did is present", http.StatusBadRequest)
 				return
 			}
-			if err := jmapserver.VerifyDIDBinding(body.DID, username, r.Host, body.BindTS, body.DIDSig); err != nil {
-				http.Error(w, "did binding: "+err.Error(), http.StatusUnauthorized)
+			// The proof is verified by the anchor, not here (ANCHOR.md decision 1),
+			// so without an anchor there is nobody to verify it — and an unverified
+			// DID must never reach RecordLocalDID, or anyone could have this relay
+			// index someone else's identity as their own. Anchorless means plain
+			// accounts, exactly as ANCHOR.md's non-goals describe it.
+			if cfg.AnchorURL == "" {
+				http.Error(w, "did not supported on this relay (no identity anchor)", http.StatusBadRequest)
 				return
 			}
 		}
@@ -122,12 +127,17 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 			return
 		}
 
-		// Identity anchor: claim/verify localpart → DID (signature already proved
-		// control above). jmapap holds no anchor storage of its own anymore — it
-		// defers to the standalone anchor service, same as jmapsmtp already does.
-		// Anchorless (AnchorURL unset) just skips this (DID.md "DID is optional").
-		if hasDID && cfg.AnchorURL != "" {
-			switch jmapserver.AnchorClaim(cfg.AnchorURL, username, domain, "", body.DID) {
+		// Identity anchor: prove control of the DID and claim localpart → DID —
+		// one round trip, both jobs. jmapap holds no anchor storage of its own
+		// anymore, and now no DID crypto either: it defers to the standalone
+		// anchor service, same as jmapsmtp. r.Host is forwarded verbatim — it is
+		// what the client signed against, and only this relay saw it first-hand.
+		if hasDID {
+			proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
+			switch jmapserver.AnchorClaim(cfg.AnchorURL, username, domain, "", body.DID, proof) {
+			case "invalid":
+				http.Error(w, "did binding rejected", http.StatusUnauthorized)
+				return
 			case "conflict":
 				http.Error(w, "identity owned by a different key", http.StatusConflict)
 				return
