@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/yno9/go-jmapap/cryptenv"
-	jmapserver "github.com/yno9/go-jmapserver"
 )
 
 var validUsername = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,30}$`)
@@ -83,8 +82,10 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 			// there is nobody to verify it — and an unverified DID must never be
 			// claimed, or anyone could have a stranger's identity recorded as
 			// their own. Anchorless means plain accounts, exactly as ANCHOR.md's
-			// non-goals describe it.
-			if cfg.AnchorURL == "" {
+			// non-goals describe it. In a noanchor build anchorAvailable() is
+			// false and this refuses every DID unconditionally — the anchor code
+			// was never compiled in to prove one.
+			if !anchorAvailable() || cfg.AnchorURL == "" {
 				http.Error(w, "did not supported on this relay (no identity anchor)", http.StatusBadRequest)
 				return
 			}
@@ -136,8 +137,7 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 		// anchor service, same as jmapsmtp. r.Host is forwarded verbatim — it is
 		// what the client signed against, and only this relay saw it first-hand.
 		if hasDID {
-			proof := jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
-			switch jmapserver.AnchorClaim(anchorRef(), username, domain, body.DID, proof) {
+			switch anchorClaim(username, domain, body.DID, body.DIDSig, body.BindTS, r.Host) {
 			case "invalid":
 				http.Error(w, "did binding rejected", http.StatusUnauthorized)
 				return

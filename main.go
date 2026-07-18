@@ -81,24 +81,9 @@ type Config struct {
 	AnchorToken string `json:"anchor_token"`
 }
 
-// anchorRef bundles where this relay's anchor is with the secret that proves it
-// may write there — the two always travel together and both come from config.
-func anchorRef() jmapserver.AnchorRef {
-	return jmapserver.AnchorRef{URL: cfg.AnchorURL, Token: cfg.AnchorToken}
-}
-
-// requireAnchorToken refuses to start an anchored relay that cannot authenticate
-// itself. There is deliberately no "just warn and carry on": an anchor whose
-// writes are unauthenticated lets anyone on the internet claim a name nobody
-// holds, or release somebody else's claim and take it, DNS record and all. A
-// silent fallback here would be exactly the *quiet* security degradation
-// src/did/freshness.ts refuses for the same reason — it also has no default and
-// throws instead.
-func requireAnchorToken() {
-	if cfg.AnchorURL != "" && cfg.AnchorToken == "" {
-		log.Fatalf("config: anchor_url is set but anchor_token is empty — the anchor's writes would be unauthenticated (set it to the anchor's relay_token)")
-	}
-}
+// anchorRef, the anchor-write seam, and DID config validation live in
+// anchor_on.go / anchor_off.go — selected by the noanchor build tag — so this
+// file names nothing from the anchor package.
 
 var cfg Config
 
@@ -422,7 +407,7 @@ func main() {
 	if len(cfg.Domains) == 0 {
 		log.Fatalf("config: no domains defined")
 	}
-	requireAnchorToken()
+	checkAnchorConfig()
 	if cfg.WebRoot != "" && !filepath.IsAbs(cfg.WebRoot) {
 		cfg.WebRoot = filepath.Join(dir, cfg.WebRoot)
 	}
@@ -504,14 +489,12 @@ func main() {
 	registerAuthEnv(mux, dataDir)
 	registerProvision(mux, h, dataDir)
 	registerAPRoutes(mux, h)
-	registerDidUpdate(mux, h, dataDir)
-	// GET /identity/local/<did> is gone: the anchor's by-did answers the same
+	// DID-only routes (PUT /account/did, /pkarr gateway). registerAnchorRoutes
+	// is a no-op in the noanchor build, which mounts neither. GET
+	// /identity/local/<did> is gone: the anchor's by-did answers the same
 	// question across every relay, not just this one (ANCHOR.md decision 1).
+	registerAnchorRoutes(mux, h, dataDir)
 	jmapserver.RegisterContactsEndpoints(mux, dataDir, authenticate)
-	// Pkarr/did:dht gateway: this relay no longer runs a DHT node, it forwards
-	// to the anchor's (ANCHOR.md decision 1). The route stays because clients
-	// derive their gateway URL from their own relay and publish only there.
-	jmapserver.RegisterPkarrProxy(mux, anchorRef())
 	registerAccountDelete(mux, h, dataDir)
 	jmapserver.RegisterStorageEndpoints(mux, dataDir, authenticate, func(email string) int {
 		h.mu.RLock()
